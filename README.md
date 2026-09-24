@@ -44,10 +44,10 @@ fetching a message to confirm it was the bot's own. Both would need
 One choice remains, made at compile time by `FOLLOW_UP_MODE` in
 [`src/index.ts`](src/index.ts):
 
-| `FOLLOW_UP_MODE` | Follow-ups are posted as… | Permissions requested |
-| --- | --- | --- |
-| `'reply'` | a Discord reply quoting the announcement | View Channel, Send Messages, Read Message History |
-| `'message'` (current) | a plain message in the same channel | View Channel, Send Messages |
+| `FOLLOW_UP_MODE`      | Follow-ups are posted as…                | Permissions requested                             |
+| --------------------- | ---------------------------------------- | ------------------------------------------------- |
+| `'reply'`             | a Discord reply quoting the announcement | View Channel, Send Messages, Read Message History |
+| `'message'` (current) | a plain message in the same channel      | View Channel, Send Messages                       |
 
 Discord requires `READ_MESSAGE_HISTORY` to create a message that references
 another one, which is the only reason `'reply'` needs it. Replies are kept
@@ -62,26 +62,6 @@ An admin of the server opens the invite link (`inviteUrl(clientId)`, shown on
 the application's admin page), picks the server, and confirms the
 permissions above. Then restrict the bot to a single channel using normal
 Discord channel permissions if you like; it only needs the one.
-
-## How printshop-scheduler uses it
-
-`printshop-scheduler` depends on this package **pinned to a git commit**
-(`git+https://github.com/imeckler/printshop-discord-bot.git#<sha>` in its
-`package.json`), so the code running in production is always a specific,
-reviewable commit of this repository. Bumping the pin is a visible change in
-that repository's history.
-
-```ts
-import { PrintRequestBot } from 'printshop-discord-bot';
-
-const bot = new PrintRequestBot({ token, channelId });
-bot.onClaim(async ({ ref, userId, username }) => {
-  // look up userId in your own database, record the claim…
-});
-await bot.start();
-const ref = await bot.announce('🖨️ New print request #12 …');
-await bot.reply(ref, '✅ Claimed by Sam.');
-```
 
 ## Development
 
