@@ -1,20 +1,28 @@
-// A deliberately small Discord bot. It does exactly two things:
+// A deliberately small Discord bot. It does exactly three things:
 //
-//   1. Posts a text announcement in one configured channel (and reacts to
-//      it with the claim emoji so members can claim with one click).
-//   2. Reports who reacted with the claim emoji (👍 by default) to one of
-//      its own announcements, so the application using it can record the
-//      "claim".
+//   1. Posts a text announcement in one configured channel.
+//   2. Reports who reacted with the claim emoji (👍 by default) to an
+//      announcement, so the application using it can record the "claim".
+//   3. Posts follow-ups about an announcement ("claimed by …").
 //
 // It never reads message content (the MESSAGE_CONTENT intent is not
-// requested), never reacts to messages it didn't post, never DMs anyone,
-// and only ever writes to the configured channel. Everything the
-// application does with a claim (matching the Discord user to an account,
-// deciding whether it counts) happens outside this package, through the
-// `onClaim` callback.
+// requested), never reacts to anything, never fetches messages, never DMs
+// anyone, never mentions anyone, and only ever writes to the configured
+// channel. Everything the application does with a claim (matching the
+// Discord user to an account, deciding whether it counts) happens outside
+// this package, through the `onClaim` callback.
 //
 // Gateway intents used: GUILDS (to see which channels exist) and
 // GUILD_MESSAGE_REACTIONS (to receive reactions). Neither is privileged.
+//
+// Permissions: the goal is the smallest set that works, so the server's
+// admins have as little as possible to trust. Two things that would have
+// been nice were dropped for that reason: reacting 👍 to our own
+// announcement (a one-click claim button; needs ADD_REACTIONS and
+// READ_MESSAGE_HISTORY) and fetching a message to check it was ours
+// (needs READ_MESSAGE_HISTORY; the application matches refs against its
+// own records instead). The one remaining trade-off is FOLLOW_UP_MODE
+// below.
 
 import {
   ChannelType,
@@ -72,15 +80,32 @@ export interface BotStatus {
   channels: ChannelInfo[];
 }
 
-// Everything the bot needs, and nothing more: see/post in channels, add its
-// own reaction, and read history (required to resolve reactions to messages
-// posted before the process started).
-export const BOT_PERMISSIONS = [
+// How follow-ups ("claimed by …", "completed") are posted. Chosen at
+// compile time; change it here and rebuild.
+//
+//   'reply':   posted as a Discord reply quoting the announcement, so the
+//              follow-up sits visibly under the request it belongs to.
+//              Discord requires READ_MESSAGE_HISTORY to create a message
+//              that references another one, so this mode needs one more
+//              permission.
+//   'message': posted as an ordinary message in the same channel. The
+//              application must say which request the follow-up is about
+//              in the text itself. Needs only VIEW_CHANNEL + SEND_MESSAGES.
+//
+// We wanted the minimal set and would have preferred 'message' on that
+// ground alone; 'reply' is kept as an option because a follow-up that
+// visibly hangs off its announcement is the one convenience that seemed
+// worth a permission. Pick whichever the server's admins are comfortable
+// with; the invite link (BOT_PERMISSIONS / inviteUrl) follows the choice.
+export type FollowUpMode = 'reply' | 'message';
+export const FOLLOW_UP_MODE: FollowUpMode = 'reply';
+
+// Everything the bot needs for the selected mode, and nothing more.
+export const BOT_PERMISSIONS: readonly bigint[] = [
   PermissionFlagsBits.ViewChannel,
   PermissionFlagsBits.SendMessages,
-  PermissionFlagsBits.AddReactions,
-  PermissionFlagsBits.ReadMessageHistory,
-] as const;
+  ...(FOLLOW_UP_MODE === 'reply' ? [PermissionFlagsBits.ReadMessageHistory] : []),
+];
 
 // Link a server admin opens to add the bot (`clientId` is the application's
 // id from the developer portal). The permissions asked for are exactly
@@ -118,7 +143,8 @@ export class PrintRequestBot {
     this.client = new Client({
       intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessageReactions],
       // Reactions to messages posted before this process started arrive
-      // with the message not in the cache; partials let us still see them.
+      // with the message not in the cache; partials let us still see them
+      // (we never fetch the message, its id is enough).
       partials: [Partials.Message, Partials.Reaction, Partials.User],
     });
     this.wire();
@@ -165,23 +191,16 @@ export class PrintRequestBot {
     reaction: MessageReaction | PartialMessageReaction,
     user: User | PartialUser
   ) {
-    if (user.bot) return; // incl. our own claim-emoji reaction
+    if (user.bot) return;
     if (this.handlers.length === 0) return;
     const name = reaction.emoji.name ?? '';
     if (!name.startsWith(this.claimEmoji)) return;
 
-    // Fill in partials. If the message is gone, so is the claim.
-    let message = reaction.message;
-    if (message.partial) {
-      try {
-        message = await message.fetch();
-      } catch {
-        return;
-      }
-    }
-    // Only our own announcements count.
-    if (message.author?.id !== this.client.user?.id) return;
-
+    // The message is usually a partial (not cached) and is left that way:
+    // its channel and id are all we need for the ref, and fetching it would
+    // need READ_MESSAGE_HISTORY. Reactions to messages we didn't post are
+    // reported too; the application ignores refs it doesn't know.
+    const message = reaction.message;
     const full = user.partial ? await user.fetch() : user;
     const claim: Claim = {
       ref: `${message.channelId}/${message.id}`,
@@ -225,9 +244,8 @@ export class PrintRequestBot {
     }
   }
 
-  // Posts `text` in the configured channel and reacts to it with the claim
-  // emoji. Returns the announcement ref, or null if nothing was posted.
-  // Never throws.
+  // Posts `text` in the configured channel. Returns the announcement ref,
+  // or null if nothing was posted. Never throws.
   async announce(text: string): Promise<string | null> {
     if (this.state !== 'ready') {
       this.log.warn(`discord bot: not ready (${this.state}); dropping announcement`);
@@ -242,11 +260,6 @@ export class PrintRequestBot {
     if (!channel) return null;
     try {
       const message = await channel.send({ content: text, allowedMentions: { parse: [] } });
-      message
-        .react(this.claimEmoji)
-        .catch(err =>
-          this.log.warn('discord bot: could not add claim reaction', (err as Error).message)
-        );
       return `${channel.id}/${message.id}`;
     } catch (err) {
       this.log.error('discord bot: send failed', err);
@@ -254,7 +267,8 @@ export class PrintRequestBot {
     }
   }
 
-  // Posts `text` as a reply to an earlier announcement. Never throws.
+  // Posts a follow-up about an earlier announcement: as a reply quoting it,
+  // or as a plain message in its channel, per FOLLOW_UP_MODE. Never throws.
   async reply(ref: string, text: string): Promise<boolean> {
     const parsed = parseRef(ref);
     if (!parsed) return false;
@@ -267,8 +281,10 @@ export class PrintRequestBot {
     try {
       await channel.send({
         content: text,
-        reply: { messageReference: parsed.messageId, failIfNotExists: false },
         allowedMentions: { parse: [] },
+        ...(FOLLOW_UP_MODE === 'reply'
+          ? { reply: { messageReference: parsed.messageId, failIfNotExists: false } }
+          : {}),
       });
       return true;
     } catch (err) {
