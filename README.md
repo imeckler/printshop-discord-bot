@@ -28,6 +28,9 @@ That's the whole surface: [`src/index.ts`](src/index.ts) is ~250 lines.
   never reacts to anything, never fetches a message, and never posts outside
   the configured channel.
 - It stores nothing. The application that embeds it keeps its own records.
+- It reconnects on its own. Ordinary disconnects are handled by discord.js;
+  if Discord invalidates the session outright, the bot logs in again with a
+  fresh client, backing off from 30 s to 10 min between attempts.
 
 Gateway intents: `GUILDS`, `GUILD_MESSAGE_REACTIONS`. Neither is privileged.
 

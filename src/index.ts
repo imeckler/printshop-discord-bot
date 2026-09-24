@@ -132,32 +132,49 @@ const parseRef = (ref: string): { channelId: string; messageId: string } | null 
   return m ? { channelId: m[1], messageId: m[2] } : null;
 };
 
+// After Discord invalidates a session, discord.js gives up for good on that
+// Client; the only way back is a brand-new one. Re-login attempts back off
+// from RELOGIN_MIN_MS, doubling up to RELOGIN_MAX_MS, so a token that has
+// really been revoked never hammers Discord (a new IDENTIFY is rationed to
+// 1000 per day) while an operational hiccup heals within minutes.
+const RELOGIN_MIN_MS = 30_000;
+const RELOGIN_MAX_MS = 10 * 60_000;
+
 export class PrintRequestBot {
-  private readonly client: Client;
+  // Null until start(), and between a session being invalidated and the
+  // replacement client logging in.
+  private client: Client | null = null;
   private readonly claimEmoji: string;
   private readonly log: Pick<Console, 'log' | 'warn' | 'error'>;
   private readonly handlers: ClaimHandler[] = [];
   private state: BotState = 'stopped';
   private detail: string | undefined;
+  private stopped = true;
+  private reloginTimer: ReturnType<typeof setTimeout> | null = null;
+  private reloginAttempt = 0;
 
   constructor(private readonly options: BotOptions) {
     this.claimEmoji = options.claimEmoji ?? DEFAULT_CLAIM_EMOJI;
     this.log = options.log ?? console;
-    this.client = new Client({
+  }
+
+  private createClient(): Client {
+    const c = new Client({
       intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessageReactions],
       // Reactions to messages posted before this process started arrive
       // with the message not in the cache; partials let us still see them
       // (we never fetch the message, its id is enough).
       partials: [Partials.Message, Partials.Reaction, Partials.User],
     });
-    this.wire();
+    this.wire(c);
+    return c;
   }
 
-  private wire() {
-    const c = this.client;
+  private wire(c: Client) {
     c.once(Events.ClientReady, ready => {
       this.state = 'ready';
       this.detail = undefined;
+      this.reloginAttempt = 0;
       this.log.log(`discord bot: logged in as ${ready.user.tag}`);
     });
     c.on(Events.ShardReady, () => {
@@ -178,9 +195,12 @@ export class PrintRequestBot {
       this.log.warn('discord bot: disconnected', event.code);
     });
     c.on(Events.Invalidated, () => {
+      // Terminal for this Client: discord.js will not reconnect it. Start
+      // over with a fresh one (see RELOGIN_MIN_MS).
       this.state = 'error';
-      this.detail = 'Discord session invalidated; restart the app (check the token).';
-      this.log.error('discord bot: session invalidated');
+      this.detail = 'Discord session invalidated; logging in again with a fresh session…';
+      this.log.error('discord bot: session invalidated; will log in again');
+      this.scheduleRelogin();
     });
     c.on(Events.Error, err => this.log.error('discord bot: client error', err));
     c.on(Events.MessageReactionAdd, (reaction, user) => {
@@ -188,6 +208,39 @@ export class PrintRequestBot {
         this.log.error('discord bot: reaction handler failed', err)
       );
     });
+  }
+
+  private scheduleRelogin() {
+    if (this.stopped || this.reloginTimer) return;
+    const delay = Math.min(RELOGIN_MIN_MS * 2 ** this.reloginAttempt, RELOGIN_MAX_MS);
+    this.reloginAttempt++;
+    this.log.warn(`discord bot: next login attempt in ${Math.round(delay / 1000)}s`);
+    this.reloginTimer = setTimeout(() => {
+      this.reloginTimer = null;
+      this.connect().catch(() => this.scheduleRelogin());
+    }, delay);
+    this.reloginTimer.unref?.();
+  }
+
+  // Replaces the current client (if any) with a fresh one and logs it in.
+  // Rejects if the login fails; the state and detail say why.
+  private async connect() {
+    const old = this.client;
+    this.client = null;
+    if (old) await old.destroy().catch(() => undefined);
+    if (this.stopped) return;
+
+    const c = this.createClient();
+    this.client = c;
+    this.state = 'starting';
+    this.detail = 'Connecting to Discord…';
+    try {
+      await c.login(this.options.token);
+    } catch (err) {
+      this.state = 'error';
+      this.detail = `Login failed: ${(err as Error).message}`;
+      throw err;
+    }
   }
 
   private async handleReaction(
@@ -225,26 +278,35 @@ export class PrintRequestBot {
   }
 
   // Logs in. Resolves once the gateway connection is up; rejects if the
-  // token is refused. discord.js reconnects on its own after that.
+  // login fails (bad token, no network), in which case it keeps retrying in
+  // the background with backoff. discord.js reconnects on its own after
+  // that; a session Discord invalidates is replaced with a fresh client.
   async start() {
-    this.state = 'starting';
-    this.detail = 'Connecting to Discord…';
+    this.stopped = false;
     try {
-      await this.client.login(this.options.token);
+      await this.connect();
     } catch (err) {
-      this.state = 'error';
-      this.detail = `Login failed: ${(err as Error).message}`;
+      this.scheduleRelogin();
       throw err;
     }
   }
 
   async stop() {
-    await this.client.destroy();
+    this.stopped = true;
+    if (this.reloginTimer) {
+      clearTimeout(this.reloginTimer);
+      this.reloginTimer = null;
+    }
+    this.reloginAttempt = 0;
+    const c = this.client;
+    this.client = null;
+    if (c) await c.destroy().catch(() => undefined);
     this.state = 'stopped';
     this.detail = undefined;
   }
 
   private async sendableChannel(channelId: string): Promise<SendableChannels | null> {
+    if (!this.client) return null;
     try {
       const channel = await this.client.channels.fetch(channelId);
       return channel && channel.isSendable() ? channel : null;
@@ -305,11 +367,12 @@ export class PrintRequestBot {
 
   async status(): Promise<BotStatus> {
     const status: BotStatus = { state: this.state, detail: this.detail, channels: [] };
-    const me = this.client.user;
-    if (!me || this.state !== 'ready') return status;
+    const client = this.client;
+    const me = client?.user;
+    if (!client || !me || this.state !== 'ready') return status;
     status.botUser = { id: me.id, tag: me.tag };
 
-    for (const guild of this.client.guilds.cache.values()) {
+    for (const guild of client.guilds.cache.values()) {
       let member;
       try {
         member = guild.members.me ?? (await guild.members.fetchMe());
