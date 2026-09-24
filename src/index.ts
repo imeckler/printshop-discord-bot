@@ -333,7 +333,8 @@ export class PrintRequestBot {
     const message = await channel
       .send({ content: text, allowedMentions: { parse: [] } })
       .catch(this.failed('send failed'));
-    return message && `${channel.id}/${message.id}`;
+    if (!message) return null;
+    return `${channel.id}/${message.id}`;
   }
 
   // Posts a follow-up about an earlier announcement: as a reply quoting it,
