@@ -244,6 +244,18 @@ export class PrintRequestBot {
     });
   }
 
+  // The client, if it is connected and ready to talk to Discord.
+  private readyClient(): Client | null {
+    return this.state === 'ready' ? this.client : null;
+  }
+
+  // Same, but says what is being dropped when it isn't.
+  private readyOrDrop(what: string): Client | null {
+    const client = this.readyClient();
+    if (!client) this.log.warn(`discord bot: not ready (${this.state}); dropping ${what}`);
+    return client;
+  }
+
   // For `.catch(this.failed('…'))`: log the rejection and turn it into null.
   private failed(what: string, level: 'warn' | 'error' = 'error') {
     return (err: unknown): null => {
@@ -322,10 +334,7 @@ export class PrintRequestBot {
   // Posts `text` in the configured channel. Returns the announcement ref,
   // or null if nothing was posted. Never throws.
   async announce(text: string): Promise<string | null> {
-    if (this.state !== 'ready') {
-      this.log.warn(`discord bot: not ready (${this.state}); dropping announcement`);
-      return null;
-    }
+    if (!this.readyOrDrop('announcement')) return null;
     const channelId = this.options.channelId;
     if (!channelId) {
       this.log.warn('discord bot: no channel configured; dropping announcement');
@@ -345,10 +354,7 @@ export class PrintRequestBot {
   async reply(ref: string, text: string): Promise<boolean> {
     const parsed = parseRef(ref);
     if (!parsed) return false;
-    if (this.state !== 'ready') {
-      this.log.warn(`discord bot: not ready (${this.state}); dropping reply`);
-      return false;
-    }
+    if (!this.readyOrDrop('reply')) return false;
     const channel = await this.sendableChannel(parsed.channelId);
     if (!channel) return false;
     const message = await channel
@@ -365,10 +371,9 @@ export class PrintRequestBot {
 
   async status(): Promise<BotStatus> {
     const status: BotStatus = { state: this.state, detail: this.detail, channels: [] };
-    const client = this.client;
-    const me = client?.user;
-    if (!client || !me || this.state !== 'ready') return status;
-    status.botUser = { id: me.id, tag: me.tag };
+    const client = this.readyClient();
+    if (!client?.user) return status;
+    status.botUser = { id: client.user.id, tag: client.user.tag };
 
     // Text channels in each server where the bot can both see and post.
     const postableIn = async (guild: Guild): Promise<ChannelInfo[]> => {
