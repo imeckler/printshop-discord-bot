@@ -98,7 +98,9 @@ export interface BotStatus {
 // worth a permission. Pick whichever the server's admins are comfortable
 // with; the invite link (BOT_PERMISSIONS / inviteUrl) follows the choice.
 export type FollowUpMode = 'reply' | 'message';
-export const FOLLOW_UP_MODE: FollowUpMode = 'reply';
+// (`as`, not a type annotation: a const initialised with a literal is narrowed
+// to that literal, and the other branch of each check would then be an error.)
+export const FOLLOW_UP_MODE = 'message' as FollowUpMode;
 
 // Everything the bot needs for the selected mode, and nothing more.
 export const BOT_PERMISSIONS: readonly bigint[] = [

@@ -42,8 +42,8 @@ One choice remains, made at compile time by `FOLLOW_UP_MODE` in
 
 | `FOLLOW_UP_MODE` | Follow-ups are posted as… | Permissions requested |
 | --- | --- | --- |
-| `'reply'` (current) | a Discord reply quoting the announcement | View Channel, Send Messages, Read Message History |
-| `'message'` | a plain message in the same channel | View Channel, Send Messages |
+| `'reply'` | a Discord reply quoting the announcement | View Channel, Send Messages, Read Message History |
+| `'message'` (current) | a plain message in the same channel | View Channel, Send Messages |
 
 Discord requires `READ_MESSAGE_HISTORY` to create a message that references
 another one, which is the only reason `'reply'` needs it. Replies are kept
