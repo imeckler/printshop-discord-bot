@@ -35,6 +35,7 @@ import {
   type MessageReaction,
   type PartialMessageReaction,
   type PartialUser,
+  type Guild,
   type SendableChannels,
   type User,
 } from 'discord.js';
@@ -103,10 +104,12 @@ export type FollowUpMode = 'reply' | 'message';
 // to that literal, and the other branch of each check would then be an error.)
 export const FOLLOW_UP_MODE = 'message' as FollowUpMode;
 
+// What posting in a channel takes.
+const POST_PERMISSIONS = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages];
+
 // Everything the bot needs for the selected mode, and nothing more.
 export const BOT_PERMISSIONS: readonly bigint[] = [
-  PermissionFlagsBits.ViewChannel,
-  PermissionFlagsBits.SendMessages,
+  ...POST_PERMISSIONS,
   ...(FOLLOW_UP_MODE === 'reply' ? [PermissionFlagsBits.ReadMessageHistory] : []),
 ];
 
@@ -367,24 +370,16 @@ export class PrintRequestBot {
     if (!client || !me || this.state !== 'ready') return status;
     status.botUser = { id: me.id, tag: me.tag };
 
-    for (const guild of client.guilds.cache.values()) {
+    // Text channels in each server where the bot can both see and post.
+    const postableIn = async (guild: Guild): Promise<ChannelInfo[]> => {
       const member = guild.members.me ?? (await guild.members.fetchMe().catch(() => null));
-      if (!member) continue;
-      for (const channel of guild.channels.cache.values()) {
-        if (
-          channel.type !== ChannelType.GuildText &&
-          channel.type !== ChannelType.GuildAnnouncement
-        )
-          continue;
-        const perms = channel.permissionsFor(member);
-        if (
-          !perms.has(PermissionFlagsBits.ViewChannel) ||
-          !perms.has(PermissionFlagsBits.SendMessages)
-        )
-          continue;
-        status.channels.push({ id: channel.id, name: `#${channel.name} (${guild.name})` });
-      }
-    }
+      if (!member) return [];
+      return guild.channels.cache
+        .filter(c => c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement)
+        .filter(c => c.permissionsFor(member).has(POST_PERMISSIONS))
+        .map(c => ({ id: c.id, name: `#${c.name} (${guild.name})` }));
+    };
+    status.channels = (await Promise.all(client.guilds.cache.map(postableIn))).flat();
     if (this.options.channelId) {
       status.channel = status.channels.find(c => c.id === this.options.channelId);
     }
