@@ -234,13 +234,19 @@ export class PrintRequestBot {
     this.client = c;
     this.state = 'starting';
     this.detail = 'Connecting to Discord…';
-    try {
-      await c.login(this.options.token);
-    } catch (err) {
+    await c.login(this.options.token).catch((err: Error) => {
       this.state = 'error';
-      this.detail = `Login failed: ${(err as Error).message}`;
+      this.detail = `Login failed: ${err.message}`;
       throw err;
-    }
+    });
+  }
+
+  // For `.catch(this.failed('…'))`: log the rejection and turn it into null.
+  private failed(what: string, level: 'warn' | 'error' = 'error') {
+    return (err: unknown): null => {
+      this.log[level](`discord bot: ${what}`, err);
+      return null;
+    };
   }
 
   private async handleReaction(
@@ -283,12 +289,10 @@ export class PrintRequestBot {
   // that; a session Discord invalidates is replaced with a fresh client.
   async start() {
     this.stopped = false;
-    try {
-      await this.connect();
-    } catch (err) {
+    await this.connect().catch(err => {
       this.scheduleRelogin();
       throw err;
-    }
+    });
   }
 
   async stop() {
@@ -306,14 +310,10 @@ export class PrintRequestBot {
   }
 
   private async sendableChannel(channelId: string): Promise<SendableChannels | null> {
-    if (!this.client) return null;
-    try {
-      const channel = await this.client.channels.fetch(channelId);
-      return channel && channel.isSendable() ? channel : null;
-    } catch (err) {
-      this.log.warn(`discord bot: cannot fetch channel ${channelId}`, (err as Error).message);
-      return null;
-    }
+    const channel = await this.client?.channels
+      .fetch(channelId)
+      .catch(this.failed(`cannot fetch channel ${channelId}`, 'warn'));
+    return channel?.isSendable() ? channel : null;
   }
 
   // Posts `text` in the configured channel. Returns the announcement ref,
@@ -330,13 +330,10 @@ export class PrintRequestBot {
     }
     const channel = await this.sendableChannel(channelId);
     if (!channel) return null;
-    try {
-      const message = await channel.send({ content: text, allowedMentions: { parse: [] } });
-      return `${channel.id}/${message.id}`;
-    } catch (err) {
-      this.log.error('discord bot: send failed', err);
-      return null;
-    }
+    const message = await channel
+      .send({ content: text, allowedMentions: { parse: [] } })
+      .catch(this.failed('send failed'));
+    return message && `${channel.id}/${message.id}`;
   }
 
   // Posts a follow-up about an earlier announcement: as a reply quoting it,
@@ -350,19 +347,16 @@ export class PrintRequestBot {
     }
     const channel = await this.sendableChannel(parsed.channelId);
     if (!channel) return false;
-    try {
-      await channel.send({
+    const message = await channel
+      .send({
         content: text,
         allowedMentions: { parse: [] },
         ...(FOLLOW_UP_MODE === 'reply'
           ? { reply: { messageReference: parsed.messageId, failIfNotExists: false } }
           : {}),
-      });
-      return true;
-    } catch (err) {
-      this.log.error('discord bot: reply failed', err);
-      return false;
-    }
+      })
+      .catch(this.failed('reply failed'));
+    return message !== null;
   }
 
   async status(): Promise<BotStatus> {
@@ -373,12 +367,8 @@ export class PrintRequestBot {
     status.botUser = { id: me.id, tag: me.tag };
 
     for (const guild of client.guilds.cache.values()) {
-      let member;
-      try {
-        member = guild.members.me ?? (await guild.members.fetchMe());
-      } catch {
-        continue;
-      }
+      const member = guild.members.me ?? (await guild.members.fetchMe().catch(() => null));
+      if (!member) continue;
       for (const channel of guild.channels.cache.values()) {
         if (
           channel.type !== ChannelType.GuildText &&
