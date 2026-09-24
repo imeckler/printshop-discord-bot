@@ -9,8 +9,9 @@ announce new print requests and let print squad members claim them.
 
 1. **Posts an announcement** (plain text, no embeds, no mentions) in one
    configured channel.
-2. **Reports who reacted 👍** to an announcement to the application that
-   runs it, as `{ userId, username, ref }`.
+2. **Reports who reacted 👍** to a message in that channel to the
+   application that runs it, as `{ userId, username, ref }`. Reactions in
+   any other channel are discarded on arrival.
 3. **Posts follow-ups** about an earlier announcement ("claimed by …",
    "completed by …").
 

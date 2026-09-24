@@ -42,8 +42,9 @@ import {
 export interface BotOptions {
   // Bot token from the Discord developer portal (Bot > Token).
   token: string;
-  // Channel announcements are posted in. Optional so the bot can be started
-  // before the channel is chosen: `status()` lists the channels it can see.
+  // Channel announcements are posted in, and the only channel whose
+  // reactions are looked at. Optional so the bot can be started before the
+  // channel is chosen: `status()` lists the channels it can see.
   channelId?: string;
   // Reaction that counts as a claim. Skin-tone variants of it also count.
   claimEmoji?: string;
@@ -193,6 +194,13 @@ export class PrintRequestBot {
     reaction: MessageReaction | PartialMessageReaction,
     user: User | PartialUser
   ) {
+    // The GUILD_MESSAGE_REACTIONS intent delivers every reaction in every
+    // channel the bot can view; it cannot be narrowed server-side. Anything
+    // outside the configured channel is dropped here, before any lookup or
+    // request happens. (Only when a channel is configured: until then the
+    // bot is just being set up and nothing is announced anyway.)
+    const message = reaction.message;
+    if (this.options.channelId && message.channelId !== this.options.channelId) return;
     if (user.bot) return;
     if (this.handlers.length === 0) return;
     const name = reaction.emoji.name ?? '';
@@ -200,9 +208,9 @@ export class PrintRequestBot {
 
     // The message is usually a partial (not cached) and is left that way:
     // its channel and id are all we need for the ref, and fetching it would
-    // need READ_MESSAGE_HISTORY. Reactions to messages we didn't post are
-    // reported too; the application ignores refs it doesn't know.
-    const message = reaction.message;
+    // need READ_MESSAGE_HISTORY. Reactions to messages in the channel that
+    // we didn't post are reported too; the application ignores refs it
+    // doesn't know.
     const full = user.partial ? await user.fetch() : user;
     const claim: Claim = {
       ref: `${message.channelId}/${message.id}`,
