@@ -134,6 +134,10 @@ export function inviteUrl(clientId: string): string {
   return `https://discord.com/oauth2/authorize?${params}`;
 }
 
+// For text that comes from users: Discord renders markdown in bot messages,
+// including masked links, so anything untrusted should go through this.
+export { escapeMarkdown } from 'discord.js';
+
 const DEFAULT_CLAIM_LABEL = 'Claim';
 // customId of the claim button; the only component the bot ever posts.
 const CLAIM_BUTTON_ID = 'claim';
