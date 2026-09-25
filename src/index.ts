@@ -43,6 +43,7 @@ import {
   type Guild,
   type Interaction,
   type SendableChannels,
+  escapeMarkdown,
 } from 'discord.js';
 
 export interface BotOptions {
@@ -134,9 +135,11 @@ export function inviteUrl(clientId: string): string {
   return `https://discord.com/oauth2/authorize?${params}`;
 }
 
-// For text that comes from users: Discord renders markdown in bot messages,
-// including masked links, so anything untrusted should go through this.
-export { escapeMarkdown } from 'discord.js';
+// For text that comes from users. Discord renders markdown in bot messages,
+// including masked links and headings (which discord.js's escapeMarkdown
+// leaves alone by default), so anything untrusted should go through this.
+export const escapeUserText = (text: string): string =>
+  escapeMarkdown(text, { maskedLink: true, heading: true, bulletedList: true, numberedList: true });
 
 const DEFAULT_CLAIM_LABEL = 'Claim';
 // customId of the claim button; the only component the bot ever posts.
