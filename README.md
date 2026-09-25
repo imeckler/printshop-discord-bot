@@ -7,11 +7,11 @@ announce new print requests and let print squad members claim them.
 
 ## What it does
 
-1. **Posts an announcement** (plain text, no embeds, no mentions) in one
-   configured channel.
-2. **Reports who reacted 👍** to a message in that channel to the
-   application that runs it, as `{ userId, username, ref }`. Reactions in
-   any other channel are discarded on arrival.
+1. **Posts an announcement** (plain text, no embeds, no mentions) with a
+   **Claim** button under it, in one configured channel.
+2. **Reports who clicked the button** to the application that runs it, as
+   `{ userId, username, ref }`, and lets the application answer that person
+   privately (an ephemeral message only they see).
 3. **Posts follow-ups** about an earlier announcement ("claimed by …",
    "completed by …").
 
@@ -19,27 +19,33 @@ That's the whole surface: [`src/index.ts`](src/index.ts) is ~250 lines.
 
 ## What it does not do
 
-- It does **not** request the `MESSAGE_CONTENT` intent and never reads
-  message text. It only sees reactions, and only acts on reactions to
-  messages it posted itself.
+- It does **not** see messages or reactions. The only events it receives
+  are clicks on its own button: Discord delivers component interactions
+  only for messages the bot itself posted, and they need no intent. The
+  `GUILD_MESSAGES`, `MESSAGE_CONTENT` and `GUILD_MESSAGE_REACTIONS` intents
+  are not requested.
 - It does **not** read the member list, roles, or presence
   (`GUILD_MEMBERS` / `GUILD_PRESENCES` are not requested).
 - It never DMs anyone, never mentions anyone (`allowedMentions: { parse: [] }`),
   never reacts to anything, never fetches a message, and never posts outside
-  the configured channel.
+  the configured channel. The one private message it can send is an
+  ephemeral reply to someone who just clicked the button.
 - It stores nothing. The application that embeds it keeps its own records.
 - It reconnects on its own. Ordinary disconnects are handled by discord.js;
   if Discord invalidates the session outright, the bot logs in again with a
   fresh client, backing off from 30 s to 10 min between attempts.
 
-Gateway intents: `GUILDS`, `GUILD_MESSAGE_REACTIONS`. Neither is privileged.
+Gateway intents: `GUILDS` only (to list channels for the admin page). Not
+privileged.
 
 ## Permissions
 
-The aim is the smallest set that works. Two conveniences were dropped for
-that: reacting 👍 to its own announcements (a one-click claim button) and
-fetching a message to confirm it was the bot's own. Both would need
-`READ_MESSAGE_HISTORY`.
+The aim is the smallest set that works. An earlier design used a 👍
+reaction as the claim; that meant receiving every reaction in every channel
+the bot could see, and the conveniences around it (reacting first, checking
+a message was the bot's own) needed `READ_MESSAGE_HISTORY`. A button under
+the announcement replaces all of that with zero intents and no extra
+permission.
 
 One choice remains, made at compile time by `FOLLOW_UP_MODE` in
 [`src/index.ts`](src/index.ts):

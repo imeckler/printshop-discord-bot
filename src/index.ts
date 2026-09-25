@@ -1,65 +1,73 @@
 // A deliberately small Discord bot. It does exactly three things:
 //
-//   1. Posts a text announcement in one configured channel.
-//   2. Reports who reacted with the claim emoji (👍 by default) to an
-//      announcement, so the application using it can record the "claim".
+//   1. Posts a text announcement, with a "Claim" button under it, in one
+//      configured channel.
+//   2. Reports who clicked the button, so the application using it can
+//      record the "claim", and lets the application answer that person
+//      privately.
 //   3. Posts follow-ups about an announcement ("claimed by …").
 //
-// It never reads message content (the MESSAGE_CONTENT intent is not
-// requested), never reacts to anything, never fetches messages, never DMs
-// anyone, never mentions anyone, and only ever writes to the configured
-// channel. Everything the application does with a claim (matching the
-// Discord user to an account, deciding whether it counts) happens outside
-// this package, through the `onClaim` callback.
+// What it can observe is exactly clicks on its own button. Discord sends a
+// bot an interaction only for components on messages the bot itself
+// posted; that needs no gateway intent at all. So the bot never sees
+// messages (no GUILD_MESSAGES or MESSAGE_CONTENT intent), never sees
+// reactions (no GUILD_MESSAGE_REACTIONS intent), never fetches messages,
+// never DMs anyone, never mentions anyone, and only ever writes to the
+// configured channel. Everything the application does with a claim
+// (matching the Discord user to an account, deciding whether it counts)
+// happens outside this package, through the `onClaim` callback.
 //
-// Gateway intents used: GUILDS (to see which channels exist) and
-// GUILD_MESSAGE_REACTIONS (to receive reactions). Neither is privileged.
+// Gateway intents used: GUILDS only (to see which channels exist, for the
+// admin page). Not privileged.
 //
 // Permissions: the goal is the smallest set that works, so the server's
-// admins have as little as possible to trust. Two things that would have
-// been nice were dropped for that reason: reacting 👍 to our own
-// announcement (a one-click claim button; needs ADD_REACTIONS and
-// READ_MESSAGE_HISTORY) and fetching a message to check it was ours
-// (needs READ_MESSAGE_HISTORY; the application matches refs against its
-// own records instead). The one remaining trade-off is FOLLOW_UP_MODE
-// below.
+// admins have as little as possible to trust. Earlier designs used a 👍
+// reaction as the claim; that needed the reactions intent (every reaction
+// in every visible channel is delivered) and, for conveniences like
+// reacting first or checking a message was ours, READ_MESSAGE_HISTORY. The
+// button removes all of that. The one remaining trade-off is
+// FOLLOW_UP_MODE below.
 
 import {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   ChannelType,
   Client,
   Events,
   GatewayIntentBits,
+  MessageFlags,
   OAuth2Scopes,
-  Partials,
   PermissionFlagsBits,
-  type MessageReaction,
-  type PartialMessageReaction,
-  type PartialUser,
+  type ButtonInteraction,
   type Guild,
+  type Interaction,
   type SendableChannels,
-  type User,
 } from 'discord.js';
 
 export interface BotOptions {
   // Bot token from the Discord developer portal (Bot > Token).
   token: string;
-  // Channel announcements are posted in, and the only channel whose
-  // reactions are looked at. Optional so the bot can be started before the
-  // channel is chosen: `status()` lists the channels it can see.
+  // Channel announcements are posted in. Optional so the bot can be started
+  // before the channel is chosen: `status()` lists the channels it can see.
   channelId?: string;
-  // Reaction that counts as a claim. Skin-tone variants of it also count.
-  claimEmoji?: string;
+  // Text on the claim button (default "Claim").
+  claimLabel?: string;
   log?: Pick<Console, 'log' | 'warn' | 'error'>;
 }
 
-// A member reacted with the claim emoji to one of the bot's announcements.
+// A member clicked the claim button under one of the bot's announcements.
 export interface Claim {
   // The announcement, as returned by `announce()`.
   ref: string;
   // Discord user id (a snowflake, stable for the life of the account).
   userId: string;
-  // Display name at the time of the reaction; for humans, not for matching.
+  // Display name at the time of the click; for humans, not for matching.
   username: string;
+  // Sends `text` so that only the person who clicked sees it (an ephemeral
+  // follow-up). Discord allows this for 15 minutes after the click. Never
+  // throws.
+  replyPrivately(text: string): Promise<void>;
 }
 
 export type ClaimHandler = (claim: Claim) => void | Promise<void>;
@@ -126,7 +134,9 @@ export function inviteUrl(clientId: string): string {
   return `https://discord.com/oauth2/authorize?${params}`;
 }
 
-const DEFAULT_CLAIM_EMOJI = '👍';
+const DEFAULT_CLAIM_LABEL = 'Claim';
+// customId of the claim button; the only component the bot ever posts.
+const CLAIM_BUTTON_ID = 'claim';
 
 // Announcement refs are "<channel id>/<message id>": enough to reply to the
 // message later without any other state.
@@ -147,7 +157,7 @@ export class PrintRequestBot {
   // Null until start(), and between a session being invalidated and the
   // replacement client logging in.
   private client: Client | null = null;
-  private readonly claimEmoji: string;
+  private readonly claimLabel: string;
   private readonly log: Pick<Console, 'log' | 'warn' | 'error'>;
   private readonly handlers: ClaimHandler[] = [];
   private state: BotState = 'stopped';
@@ -157,18 +167,13 @@ export class PrintRequestBot {
   private reloginAttempt = 0;
 
   constructor(private readonly options: BotOptions) {
-    this.claimEmoji = options.claimEmoji ?? DEFAULT_CLAIM_EMOJI;
+    this.claimLabel = options.claimLabel || DEFAULT_CLAIM_LABEL;
     this.log = options.log ?? console;
   }
 
   private createClient(): Client {
-    const c = new Client({
-      intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessageReactions],
-      // Reactions to messages posted before this process started arrive
-      // with the message not in the cache; partials let us still see them
-      // (we never fetch the message, its id is enough).
-      partials: [Partials.Message, Partials.Reaction, Partials.User],
-    });
+    // Button clicks (interactions) arrive without any intent.
+    const c = new Client({ intents: [GatewayIntentBits.Guilds] });
     this.wire(c);
     return c;
   }
@@ -206,9 +211,10 @@ export class PrintRequestBot {
       this.scheduleRelogin();
     });
     c.on(Events.Error, err => this.log.error('discord bot: client error', err));
-    c.on(Events.MessageReactionAdd, (reaction, user) => {
-      this.handleReaction(reaction, user).catch(err =>
-        this.log.error('discord bot: reaction handler failed', err)
+    c.on(Events.InteractionCreate, (interaction: Interaction) => {
+      if (!interaction.isButton() || interaction.customId !== CLAIM_BUTTON_ID) return;
+      this.handleClick(interaction).catch(err =>
+        this.log.error('discord bot: claim handler failed', err)
       );
     });
   }
@@ -264,32 +270,29 @@ export class PrintRequestBot {
     };
   }
 
-  private async handleReaction(
-    reaction: MessageReaction | PartialMessageReaction,
-    user: User | PartialUser
-  ) {
-    // The GUILD_MESSAGE_REACTIONS intent delivers every reaction in every
-    // channel the bot can view; it cannot be narrowed server-side. Anything
-    // outside the configured channel is dropped here, before any lookup or
-    // request happens. (Only when a channel is configured: until then the
-    // bot is just being set up and nothing is announced anyway.)
-    const message = reaction.message;
-    if (this.options.channelId && message.channelId !== this.options.channelId) return;
-    if (user.bot) return;
+  private async handleClick(interaction: ButtonInteraction) {
+    // Discord only delivers interactions for components on our own
+    // messages, so this is a click on a claim button we posted. Acknowledge
+    // it right away (Discord gives 3 s, after which the click shows as
+    // failed to the user); handlers may then take their time, and can
+    // still answer the clicker privately for 15 minutes.
+    await interaction.deferUpdate();
     if (this.handlers.length === 0) return;
-    const name = reaction.emoji.name ?? '';
-    if (!name.startsWith(this.claimEmoji)) return;
 
-    // The message is usually a partial (not cached) and is left that way:
-    // its channel and id are all we need for the ref, and fetching it would
-    // need READ_MESSAGE_HISTORY. Reactions to messages in the channel that
-    // we didn't post are reported too; the application ignores refs it
-    // doesn't know.
-    const full = user.partial ? await user.fetch() : user;
+    const user = interaction.user;
     const claim: Claim = {
-      ref: `${message.channelId}/${message.id}`,
-      userId: full.id,
-      username: full.globalName || full.username,
+      ref: `${interaction.channelId}/${interaction.message.id}`,
+      userId: user.id,
+      username: user.globalName || user.username,
+      replyPrivately: async text => {
+        await interaction
+          .followUp({
+            content: text,
+            flags: MessageFlags.Ephemeral,
+            allowedMentions: { parse: [] },
+          })
+          .catch(this.failed('private reply failed'));
+      },
     };
     for (const h of this.handlers) await h(claim);
   }
@@ -331,8 +334,9 @@ export class PrintRequestBot {
     return channel?.isSendable() ? channel : null;
   }
 
-  // Posts `text` in the configured channel. Returns the announcement ref,
-  // or null if nothing was posted. Never throws.
+  // Posts `text`, with the claim button under it, in the configured
+  // channel. Returns the announcement ref, or null if nothing was posted.
+  // Never throws.
   async announce(text: string): Promise<string | null> {
     if (!this.readyOrDrop('announcement')) return null;
     const channelId = this.options.channelId;
@@ -342,8 +346,16 @@ export class PrintRequestBot {
     }
     const channel = await this.sendableChannel(channelId);
     if (!channel) return null;
+    const button = new ButtonBuilder()
+      .setCustomId(CLAIM_BUTTON_ID)
+      .setLabel(this.claimLabel)
+      .setStyle(ButtonStyle.Primary);
     const message = await channel
-      .send({ content: text, allowedMentions: { parse: [] } })
+      .send({
+        content: text,
+        components: [new ActionRowBuilder<ButtonBuilder>().addComponents(button)],
+        allowedMentions: { parse: [] },
+      })
       .catch(this.failed('send failed'));
     if (!message) return null;
     return `${channel.id}/${message.id}`;
